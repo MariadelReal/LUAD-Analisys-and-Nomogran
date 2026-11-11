@@ -1,0 +1,36 @@
+if (!file.exists("TCGA.Rproj")) stop("Abre TCGA.Rproj antes de ejecutar el paso.")
+base_dir <- getwd()
+result_dir <- file.path(base_dir,"results")
+dir.create(result_dir,showWarnings=FALSE)
+library(survival)
+library(glmnet)
+X <- readRDS(file.path(base_dir,"data","X_genes_signature_scaled.rds"))
+d <- readRDS(file.path(base_dir,"data","clinical_for_modeling.rds"))
+stopifnot(identical(rownames(X),d$barcode), all(is.finite(X)), !anyDuplicated(d$barcode))
+y <- with(d,Surv(OS.time,OS.event))
+save_table <- function(x,name) write.table(x,file.path(result_dir,paste0(name,".tsv")),sep="\t",quote=FALSE,row.names=FALSE)
+set.seed(2025)
+ref <- read.delim("referencia/folds.tsv")
+stopifnot(!anyDuplicated(ref$barcode))
+if (setequal(d$barcode,ref$barcode)) {
+  folds <- ref$fold[match(d$barcode,ref$barcode)]
+  message("Se recuperaron los 10 pliegues originales por barcode.")
+} else {
+  folds <- sample(rep(1:10,length.out=nrow(X)))
+  warning("La cohorte difiere de la referencia. Se generaron pliegues nuevos con semilla 2025.")
+}
+cv <- cv.glmnet(X,y,family="cox",alpha=1,foldid=folds,standardize=TRUE,keep=TRUE)
+for(rule in c("lambda.min","lambda.1se")){
+  b <- as.matrix(coef(cv,s=rule))
+  save_table(data.frame(gene=rownames(b),beta=b[,1])[b[,1]!=0,,drop=FALSE],rule)
+}
+save_table(data.frame(rule=c("min","1se"),lambda=c(cv$lambda.min,cv$lambda.1se)),"penalties")
+source("helpers.R")
+panels("Fig4b_LASSO_CV",function() plot(cv),6.5,5)
+file.copy("figures/Fig4b_LASSO_CV.pdf",file.path(result_dir,"LASSO_CV.pdf"),overwrite=TRUE)
+d$LP_raw <- drop(predict(cv,X,s="lambda.min",type="link"))
+d$LP_pos <- d$LP_raw-min(d$LP_raw)
+save_table(d,"Nomogram_input")
+save_table(data.frame(barcode=d$barcode,fold=cv$foldid),"folds")
+saveRDS(cv,file.path(result_dir,"cv.rds"))
+print(data.frame(regla=c("lambda.min","lambda.1se"),genes=c(sum(coef(cv,s="lambda.min")!=0),sum(coef(cv,s="lambda.1se")!=0))))
